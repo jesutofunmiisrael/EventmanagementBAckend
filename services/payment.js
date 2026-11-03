@@ -1,130 +1,209 @@
-const https = require('https');
-const yup = require('yup');
-const crypto = require('crypto');
-const Registration = require('../models/Registration');
-const Ticket = require('../models/Ticket');
-const Transaction = require('../models/Transaction');
-const cron = require('node-cron');
-const nodemailer = require('nodemailer');
+const https = require("https");
+const yup = require("yup");
+const crypto = require("crypto");
 
 const emailSchema = yup.string().email().required();
 const amountSchema = yup.number().positive().required();
-const secret = process.env.SECRET_KEY;
 
-const payment = async ({ email, amount }, req, res, next) => {
-    try {
-        await emailSchema.validate(email);
-        await amountSchema.validate(amount);
+const getSecret = () => {
+  const secret = process.env.PAYSTACK_SECRET_KEY;
 
-        const paymentPayload = JSON.stringify({
-            email: email,
-            amount: Number(amount) * 100
-        });
+  if (!secret) {
+    throw new Error(
+      "PAYSTACK_SECRET_KEY is missing from the backend .env file."
+    );
+  }
 
-        const options = {
-            hostname: 'api.paystack.co',
-            port: 443,
-            path: '/transaction/initialize',
-            method: 'POST',
-            headers: {
-                Authorization: `Bearer ${secret}`,
-                'Content-Type': 'application/json',
-                'Content-Length': Buffer.byteLength(paymentPayload)
-            }
-        };
-
-        const paystackResponse = await new Promise((resolve, reject) => {
-            const reqpaystack = https.request(options, respaystack => {
-                let data = '';
-                respaystack.on('data', (chunk) => {
-                    data += chunk;
-                });
-                respaystack.on('end', () => {
-                    resolve(JSON.parse(data));
-                });
-            });
-            reqpaystack.on('error', error => {
-                next(error);
-            });
-            reqpaystack.write(paymentPayload);
-            reqpaystack.end();
-        });
-
-        const transactionId = paystackResponse.data.reference;
-        const paymentUrl = paystackResponse.data.authorization_url;
-
-        return { paymentUrl, transactionId };
-    } catch (error) {
-        next(error);
-    }
+  return secret;
 };
 
+// Send a request to Paystack and parse its response.
+const paystackRequest = (path, method, payload) => {
+  const secret = getSecret();
+
+  return new Promise((resolve, reject) => {
+    const body = payload ? JSON.stringify(payload) : "";
+
+    const options = {
+      hostname: "api.paystack.co",
+      port: 443,
+      path,
+      method,
+      headers: {
+        Authorization: `Bearer ${secret}`,
+        ...(payload
+          ? {
+              "Content-Type": "application/json",
+              "Content-Length": Buffer.byteLength(body),
+            }
+          : {}),
+      },
+    };
+
+    const request = https.request(options, (response) => {
+      let data = "";
+
+      response.setEncoding("utf8");
+
+      response.on("data", (chunk) => {
+        data += chunk;
+      });
+
+      response.on("end", () => {
+        let result;
+
+        try {
+          result = JSON.parse(data);
+        } catch {
+          return reject(
+            new Error("Paystack returned an invalid response.")
+          );
+        }
+
+        if (
+          response.statusCode < 200 ||
+          response.statusCode >= 300 ||
+          !result.status
+        ) {
+          return reject(
+            new Error(result.message || "Paystack request failed.")
+          );
+        }
+
+        resolve(result.data);
+      });
+    });
+
+    request.setTimeout(15000, () => {
+      request.destroy(new Error("Paystack request timed out."));
+    });
+
+    request.on("error", reject);
+
+    if (payload) {
+      request.write(body);
+    }
+
+    request.end();
+  });
+};
+
+// Initialize payment. Amount is received in naira.
+const payment = async ({ email, amount }) => {
+  await emailSchema.validate(email);
+  await amountSchema.validate(amount);
+
+  const amountInKobo = Math.round(Number(amount) * 100);
+
+  if (!Number.isSafeInteger(amountInKobo) || amountInKobo < 1) {
+    throw new Error("Invalid payment amount.");
+  }
+
+  // Remove a trailing slash from the frontend URL.
+  const frontendUrl = process.env.FRONTEND_URL?.replace(/\/$/, "");
+
+  // An explicit callback URL takes priority over the default.
+  const callbackUrl =
+    process.env.PAYSTACK_CALLBACK_URL ||
+    (frontendUrl
+      ? `${frontendUrl}/payment/verify`
+      : undefined);
+
+  const data = await paystackRequest(
+    "/transaction/initialize",
+    "POST",
+    {
+      email,
+      amount: amountInKobo,
+      currency: "NGN",
+      ...(callbackUrl ? { callback_url: callbackUrl } : {}),
+    }
+  );
+
+  if (!data.authorization_url || !data.reference) {
+    throw new Error(
+      "Paystack did not return a valid payment reference."
+    );
+  }
+
+  return {
+    paymentUrl: data.authorization_url,
+    transactionId: data.reference,
+  };
+};
+
+// Verify a payment directly with Paystack.
+// Never trust a successful redirect from the frontend alone.
+const verifyPaystackTransaction = async (reference) => {
+  if (typeof reference !== "string" || !reference.trim()) {
+    throw new Error(
+      "A valid Paystack payment reference is required."
+    );
+  }
+
+  const data = await paystackRequest(
+    `/transaction/verify/${encodeURIComponent(reference)}`,
+    "GET"
+  );
+
+  return data;
+};
+
+// Validate Paystack's webhook signature using the original request body.
+// Express must preserve the original request bytes as req.rawBody.
 const handlePaystackWebhook = async (req, res, next) => {
-    try {
-        const authorizationHeader = req.headers['authorization']; 
-        const calculatedSignature = crypto.createHmac('sha512', secret)
-            .update(JSON.stringify({ body: req.body, authorization: authorizationHeader }))
-            .digest('hex');
+  try {
+    const secret = getSecret();
+    const signature = req.headers["x-paystack-signature"];
+    const rawBody = req.rawBody;
 
-        if (authorizationHeader !== calculatedSignature) {
-            console.log('Signatures do not match!');
-            return res.status(404).send({
-                status: 'fail',
-                message: 'invalid webhook signature'
-            });
-        }
-
-        const paymentStatus = req.body.event;
-        const transactionId = req.body.data.id;
-
-        let registrationStatus;
-
-        switch (paymentStatus) {
-            case 'charge.success':
-            case 'transfer.success':
-                registrationStatus = 'success';
-                break;
-            case 'charge.failed':
-            case 'transfer.failed':
-                registrationStatus = 'failed';
-                break;
-            default:
-                registrationStatus = 'pending';
-        }
-
-        const updateResult = await Registration.updateOne({ transactionId }, { status: registrationStatus });
-        if (updateResult.nModified === 0) {
-            return res.status(404).json({
-                message: 'Registration not found or already updated'
-            });
-        }
-
-        const updateTransaction = await Transaction.updateOne({ _id: transactionId }, { status: registrationStatus });
-
-        if (registrationStatus === 'success') {
-            const registration = await Registration.findOne({ transactionId });
-            if (!registration) {
-                return res.status(404).json({
-                    message: 'Registration not found'
-                });
-            }
-            const ticket = await Ticket.findById(registration.ticketId);
-            if (!ticket) {
-                return res.status(404).json({
-                    message: 'Ticket not found'
-                });
-            }
-            ticket.sit -= registration.numberOfSeats;
-            await ticket.save();
-        }
-
-        return res.status(200).json({
-            status: 'success',
-            message: `Payment status updated successfully: ${registrationStatus}`
-        });
-    } catch (error) {
-        next(error);
+    if (
+      typeof signature !== "string" ||
+      !/^[a-f0-9]{128}$/i.test(signature) ||
+      !Buffer.isBuffer(rawBody)
+    ) {
+      return res.status(400).json({
+        status: "fail",
+        message:
+          "Webhook signature or raw request body is missing or invalid.",
+      });
     }
+
+    const expectedSignature = crypto
+      .createHmac("sha512", secret)
+      .update(rawBody)
+      .digest("hex");
+
+    const received = Buffer.from(signature, "hex");
+    const expected = Buffer.from(expectedSignature, "hex");
+
+    if (
+      received.length !== expected.length ||
+      !crypto.timingSafeEqual(received, expected)
+    ) {
+      return res.status(401).json({
+        status: "fail",
+        message: "Invalid Paystack webhook signature.",
+      });
+    }
+
+    console.log(
+      "Verified Paystack webhook event:",
+      req.body?.event || "unknown"
+    );
+
+    return res.status(200).json({
+      status: "success",
+      message: "Paystack webhook signature verified.",
+    });
+  } catch (error) {
+    console.error("PAYSTACK WEBHOOK ERROR:", error);
+    return next(error);
+  }
 };
 
-module.exports = { payment, handlePaystackWebhook };
+module.exports = {
+  payment,
+  verifyPaystackTransaction,
+  handlePaystackWebhook,
+};

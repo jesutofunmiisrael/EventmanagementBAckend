@@ -1,31 +1,48 @@
-const mongoose = require('mongoose');
+const mongoose = require("mongoose");
 
-const transactionSchema = new mongoose.Schema({
+const transactionSchema = new mongoose.Schema(
+  {
     userId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'User',
-        required: true
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      required: true,
     },
+
     eventId: {
-        type: mongoose.Schema.Types.ObjectId,
-        ref: 'Event',
-        required: true
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Event",
+      required: true,
     },
+
+    registrationId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Registration",
+      required: true,
+    },
+
+    transactionId: {
+      type: String,
+      required: true,
+      unique: true,
+      trim: true,
+    },
+
     amount: {
-        type: Number,
-        required: true
+      type: Number,
+      required: true,
+      min: 1,
     },
-    createdAt: {
-        type: Date,
-        default: Date.now
-    },
+
     status: {
-        type: String,
-        enum: ['pending', 'completed', 'cancelled'],
-        default: 'pending'
-    }
-});
+      type: String,
+      enum: ["pending", "completed", "cancelled"],
+      default: "pending",
+      required: true,
+    },
+  },
+  { timestamps: true }
+);
 
-const Transaction = mongoose.model('Transaction', transactionSchema);
-
-module.exports = Transaction;
+module.exports =
+  mongoose.models.Transaction ||
+  mongoose.model("Transaction", transactionSchema);

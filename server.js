@@ -1,10 +1,15 @@
-const dotenv = require('dotenv').config();
-const app = require('./app');
-const connectToDB = require('./config/db');
+require("dotenv").config();
 
-connectToDB()
+const app = require("./app");
+const connectDB = require("./config/ConnectTODB");
+const { cloudinaryConfig } = require("./middlewares/cloudinary");
 
-let port = process.env.PORT || 4000;
+cloudinaryConfig();
+
+const port = process.env.PORT || 4000;
+
+connectDB();
+
 app.listen(port, () => {
-    console.log('App is listening on port ' + port);
-})
+    console.log("App is listening on port " + port);
+});

@@ -16,10 +16,12 @@ const handleDuplicateValueError = (err) => {
 }
 
 const handleValidationErrorDB = (err) => {
-    const errors = err.errors; 
-    const message = `${errors.join(". ")}`;
+    const errors = Object.values(err.errors).map(error => error.message);
+    const message = errors.join(". ");
+
     const error = new Error(message);
     error.statusCode = 400;
+
     return error;
 };
 

@@ -5,26 +5,42 @@ const { BlacklistTokens } = require("./../models/tokenBlacklist");
 
 const protectRoutes = async (req, res, next) => {
     try {
+        console.log("PROTECT ROUTES: Checking authentication...");
+
         let token;
 
-        if (req.headers.authorization && req.headers.authorization.startsWith("Bearer")) {
+        if (
+            req.headers.authorization &&
+            req.headers.authorization.startsWith("Bearer ")
+        ) {
             token = req.headers.authorization.split(" ")[1];
         }
 
         if (!token) {
-            const error = new Error("You are currently not logged in. Please log in to continue");
+            const error = new Error(
+                "You are currently not logged in. Please log in to continue"
+            );
             error.statusCode = 401;
             return next(error);
         }
 
         const blacklistedToken = await BlacklistTokens.findOne({ token });
+
         if (blacklistedToken) {
-            const error = new Error("Invalid token supplied. Please login again");
+            const error = new Error(
+                "Invalid token supplied. Please login again"
+            );
             error.statusCode = 401;
-            return  next(error);
+            return next(error);
         }
 
-        const decoded = await promisify(jwt.verify)(token, process.env.jwtSecret);
+        const decoded = await promisify(jwt.verify)(
+            token,
+            process.env.jwtSecret
+        );
+
+        console.log("PROTECT ROUTES: Token verified.");
+
         const user = await Users.findById(decoded.id).select("-password -__v");
 
         if (!user) {
@@ -35,9 +51,13 @@ const protectRoutes = async (req, res, next) => {
         }
 
         req.user = user;
-        next();
+
+        console.log("PROTECT ROUTES: Authentication successful.");
+        return next();
+
     } catch (error) {
-        next(error);
+        console.error("PROTECT ROUTES ERROR:", error);
+        return next(error);
     }
 };
 

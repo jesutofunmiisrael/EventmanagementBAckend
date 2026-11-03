@@ -1,4 +1,7 @@
 const express = require("express");
+const { createHandler } = require("graphql-http/lib/use/express");
+const schema = require("./graphql/schema");
+const resolvers = require("./graphql/resolvers");
 const cors = require("cors")
 const morgan = require("morgan")
 const errorHandler = require("./middlewares/error");
@@ -6,6 +9,7 @@ const authRouters = require('./routes/auth');
 const userRouters = require("./routes/user");
 const eventRouters = require("./routes/event")
 const { handlePaystackWebhook } = require("./services/payment");
+
 
 const app = express();
 
@@ -26,6 +30,18 @@ app.use("/api/v1/auth", authRouters);
 app.use('/api/v1/user', userRouters);
 app.use("/api/v1/event", eventRouters);
 app.use("/api/v1/payment/webhooks", handlePaystackWebhook);
+
+
+// 👇 ADD THIS
+app.all(
+    "/graphql",
+    createHandler({
+        schema,
+        rootValue: resolvers,
+    })
+);
+
+
 
 app.all("*", (req, res) =>  {
     res.send(`${req.method} ${req.originalUrl} is not supported`)

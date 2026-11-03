@@ -36,7 +36,7 @@ const signup = async (req, res, next) => {
 
         const token = signJWT(newUser._id, newUser.email);
 
-        await notify({ username: newUser.username, email: newUser.email });
+        // await notify({ username: newUser.username, email: newUser.email });
 
         res.status(201).json({
             status: "success",
